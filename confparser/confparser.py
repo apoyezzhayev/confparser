@@ -1,12 +1,13 @@
 import argparse
+import copy
 import logging
 import re
 import warnings
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Union
 
 from confparser.actions import ActionConfFile
-from confparser.file_parser import YAMLParser
+from confparser.file_parser import YAMLParser, FileParser
 from confparser.utils import ifnone, listify
 
 logger = logging.getLogger(__name__)
@@ -40,10 +41,18 @@ class ArgumentParser(argparse.ArgumentParser):
         #     args.__setattr__(k, v)
         return args
 
-    def parse_args_from_dict(self, cfg: Dict, ns_name=None, base=None, only=True):
+    def parse_args_from_dict(self, cfg: Dict, ns_name: str = None, base: Union[str, List] = None, only_ns: bool = True):
+        """
+        Parses config from dict instead of command line
+        :param cfg: dict to parse
+        :param ns_name: name of returned Namespace if None just returns the basic Namespace
+        :param base: which keys of parsed dict should be considered if None it parses whole config dict
+        :param only_ns: if True the Namespace is returned if False the default values of parser's actions are set
+        :return: types.SimpleNamespace: An object with all parsed values as nested attributes.
+        """
         # Parse it by self (Parser) to force validation of params
         cfg_str = self._convert_dict_to_args_str(cfg, src_base=base)  # convert dict of args to list
-        if only:
+        if only_ns:
             ns = super(ArgumentParser, self).parse_args(cfg_str)
             if ns_name is not None: ns = argparse.Namespace(**{ns_name: ns})
             return ns
@@ -60,36 +69,33 @@ class ArgumentParser(argparse.ArgumentParser):
             self.set_defaults(**cfg)  # rewrite parser's defaults by arguments parsed from config file
         # setattr(namespace, self.dest, values)
 
-    def parse_args_from_file(self, file: Path = None,
-                             cfg_parser=None,
-                             namespace=None,
-                             base=None,
-                             only=True):
+    def parse_args_from_file(self, file: Union[str, Path],
+                             cfg_parser: FileParser = None,
+                             ns_name: str = None,
+                             base: Union[str, List] = None,
+                             only_ns=True):
         """
-        Reads arguments from config file
-        :param file:
-        :param cfg_parser:
-        :return:
+        Parses config from file instead of command line
+        :param file: config
+        :param cfg_parser: file decoder that parses file to dict (JSON-like structure), if None default
+            is YAML parser used
+        :param ns_name: name of returned Namespace if None just returns the basic Namespace
+        :param base: which keys of parsed dict should be considered if None it parses whole config dict
+        :param only_ns: if True the Namespace is returned if False the default values of parser's actions are set
+        :return: types.SimpleNamespace: An object with all parsed values as nested attributes.
         """
         cfg = self._load_cfg_from_path(file, cfg_parser=cfg_parser)
-        return self.parse_args_from_dict(cfg, namespace, base, only)
+        return self.parse_args_from_dict(cfg, ns_name, base, only_ns)
 
     def _load_cfg_from_path(self, cfg_path: Path, cfg_parser=None):
-        """Parses a configuration file yaml given its path.
-
-        Args:
-            cfg_path (str or Path): Path to the configuration file to parse.
-            ext_vars (dict): Optional external variables used for parsing jsonnet.
-            env (bool or None): Whether to merge with the parsed environment. None means use the ArgumentParser's default.
-            defaults (bool): Whether to merge with the parser's defaults.
-            nested (bool): Whether the namespace should be nested.
-            with_meta (bool): Whether to include metadata in config object.
-
-        Returns:
-            types.SimpleNamespace: An object with all parsed values as nested attributes.
+        """
+        Parses a configuration file yaml given its path.
 
         Raises:
             ParserError: If there is a parsing error and error_handler=None.
+        :param cfg_path: file to read
+        :param cfg_parser:
+        :return:
         """
         cfg_parser = ifnone(cfg_parser, YAMLParser())
         try:
@@ -101,12 +107,13 @@ class ArgumentParser(argparse.ArgumentParser):
     def _convert_special_args_to_kwargs(self, cfg):
         """
         Finds proper key value pairs for positional and flag arguments to
-        correspond the names from parser (Action.dest). Inplace modification of cfg
+        correspond the names from parser (Action.dest).
         :param cfg: initially parsed config from file
-        :return: None
+        :return: config dict with proper mapping
         """
         pos_args_names = []
         flag_args_names = []
+        cfg = copy.deepcopy(cfg)
 
         for a in self._actions:
             if len(a.option_strings) < 1:
@@ -126,7 +133,16 @@ class ArgumentParser(argparse.ArgumentParser):
         cfg.pop('_flag', None)  # delete _positional from the configuration
         return cfg
 
-    def _convert_dict_to_args_str(self, cfg: Dict, src_base=None, dest_base=None):
+    def _convert_dict_to_args_str(self, cfg: Dict, src_base: Union[str, List] = None, dest_base=None):
+        """
+        Converts config dictionary to arguments list formatted alike command-line args
+        :param cfg: dict
+        :param src_base: which key(s) to parse from the config file if None uses all key of config file
+        :param dest_base: which name to use for suffix prepended to outputs of parsing if None no suffix prepended.
+            Example:
+                dest_base = 'a', each parsed argument will have `a.` suffix, e.g. arg1 -> a.arg1
+        :return: list
+        """
         kwargs_list = []
         positional_args_list = []
         warnings.warn('Only accepts flag arguments without value, e.g. one can use '
