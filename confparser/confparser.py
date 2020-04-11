@@ -26,6 +26,7 @@ class ArgumentParser(argparse.ArgumentParser):
         self._conf_parsers = OrderedDict()
         super().__init__(*args, **kwargs)
 
+    # TODO: add support for nested cli arguments
     def parse_args(self, args=None, namespace=None) -> argparse.Namespace:
         # First parsing to get configuration files paths arguments
         with disable_required_args(self):
@@ -36,7 +37,7 @@ class ArgumentParser(argparse.ArgumentParser):
             parser = self._conf_parsers.get(k)
             if not (parser is None or w is None):
                 parser, base = parser
-                self.parse_args_from_file(Path(w), ns_name=k, base=base, is_complete=False)
+                parser.parse_args_from_file(Path(w), ns_name=k, base=base, is_complete=False)
 
         # Parse all arguments from command-line
         with disable_required_args(self, only_defaults=True):
@@ -44,10 +45,18 @@ class ArgumentParser(argparse.ArgumentParser):
         return args
 
     def add_conf_parser(self, arg_name: str, parser=None, base=None):
-        self._conf_parsers[arg_name] = (parser, base)
+        """
+        Adds configuration parser that reads configuration from file pointed in `--arg_name` cli argument.
+        :param arg_name: which argument `--arg_name` will be used to point to configuration file
+        :param parser: which parser should parse the configuration file, if None then the parser which
+        calls add_conf_parser will be used
+        :param base: if configuration file contains many configurations which key to use for parsing
+        :return:
+        """
         parser = ifnone(parser, self)
-        parser.add_argument('--%s' % arg_name, type=PathType(exists=True, type='file'))
-        logger.info('Added `--%s` configuration argument to %s parser' % (arg_name, str(parser.description)))
+        self._conf_parsers[arg_name] = (parser, base)
+        self.add_argument('--%s' % arg_name, type=PathType(exists=True, type='file'))
+        print('Added `--%s` configuration argument to %s parser' % (arg_name, str(parser.description)))
 
     def parse_args_from_dict(self, cfg: Dict,
                              ns_name: str = None,
@@ -62,42 +71,42 @@ class ArgumentParser(argparse.ArgumentParser):
         """
         # Find corresponding nested-dictionary
         if cfg is None: raise ValueError('config is empty for parser %s' % self.description)
-        cfg = select_keys(cfg, base, default=cfg)
+        selected_cfg = select_keys(cfg, base, default=cfg)
 
         # Process all nestsed configs by nested parsers
-        # sub_ns = {}
-        # for a in self._actions:
-        #     # Handle subparsers
-        #     if isinstance(a, MyAct):
-        #         if a._parser != self:
-        #             sub_cfg = get_key(cfg, a._base)
-        #             sub_ns.update(a._parser.parse_args_from_dict(sub_cfg, ns_name=a.dest, is_complete=True).__dict__)
-        #             # To not consider them next time
-        #             del_key(cfg, a._base)
-        #         self._ignored_actions.append(a)
+        sub_ns = {}  # sub namespaces
+        for dest, (parser, base) in self._conf_parsers.items():
+            if parser != self:
+                try:
+                    get_key(cfg, base)
+                except KeyError as e:
+                    print('%s not in %s' % (str(e), cfg))
+                    continue
+                sub_ns.update(parser.parse_args_from_dict(cfg, ns_name=dest, is_complete=False, base=base))
+                # To not consider them next time
+                del_key(selected_cfg, base.split('.')[-1])
 
-        # for a in self._ignored_actions:
-        #     self._actions.remove(a)
-        #     del self._option_string_actions[a.option_strings[0]]
-        #     if a.dest in cfg: del cfg[a.dest]
         # Parse it by self (Parser) to force validation of params
-        cfg_str = self._convert_dict_to_args_str(cfg)  # convert dict of args to list
+        # Parse by basic parsers
+        cfg_str = self._convert_dict_to_args_str(selected_cfg)  # convert dict of args to list
         # Parse string of args representation from config
         if is_complete:
             ns = super(ArgumentParser, self).parse_args(cfg_str)
             if ns_name is not None:
                 ns = argparse.Namespace(**{ns_name: ns})
-            return ns
         else:
             # Just set defaults
-            with disable_required_args(self):
-                ns, unknown = super(ArgumentParser, self).parse_known_args(cfg_str)
-            self.set_defaults(**ns.__dict__)
-        # for k, v in sub_ns.items():
-        #     ns.__setattr__(k, v)
-
-        # for a in self._ignored_actions:
-        #     self._actions.append(a)
+            # with disable_required_args(self):
+            #     ns, unknown = super(ArgumentParser, self).parse_known_args(cfg_str)
+            ns = self.parse_args(cfg_str)
+            ns = ns.__dict__
+            ns.update(sub_ns)
+            self.set_defaults(**ns)
+            if ns_name is not None:
+                ns = {ns_name: argparse.Namespace(**ns)}
+            # if ns_name is not None:
+            #     ns = {ns_name: ns}
+        return ns
 
     def parse_args_from_file(self, file: Union[str, Path],
                              cfg_parser: FileParser = None,
@@ -337,7 +346,6 @@ def select_keys(d, keys: Union[str, List[str]], default=None):
         for k in keys:
             sel_d.update(get_key(d, k, default))
         return sel_d
-
 
 # class MyAct(argparse.Action):
 #     """
