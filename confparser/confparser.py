@@ -22,7 +22,6 @@ class ArgumentParser(argparse.ArgumentParser):
     _reserved = ['_positional', '_flag']
 
     def __init__(self, *args, **kwargs):
-        self._ignored_actions = list()
         self._conf_parsers = OrderedDict()
         super().__init__(*args, **kwargs)
 
@@ -33,15 +32,21 @@ class ArgumentParser(argparse.ArgumentParser):
             known, unknown = super(ArgumentParser, self).parse_known_args(args, namespace)
 
         # Parse configuration files if present in args
+        sub_args = argparse.Namespace()
         for k, w in known.__dict__.items():
             parser = self._conf_parsers.get(k)
-            if not (parser is None or w is None):
+            if parser is not None and w is not None:
                 parser, base = parser
-                parser.parse_args_from_file(Path(w), ns_name=k, base=base, is_complete=False)
+                if parser == self:
+                    parser.parse_args_from_file(Path(w), ns_name=k, base=base, is_complete=False)
+                else:
+                    sub_args = parser.parse_args_from_file(Path(w), ns_name=k, base=base, is_complete=True)
 
         # Parse all arguments from command-line
         with disable_required_args(self, only_defaults=True):
             args = super(ArgumentParser, self).parse_args(args, namespace)
+            for k, v in sub_args.__dict__.items():
+                args.__setattr__(k, v)
         return args
 
     def add_conf_parser(self, arg_name: str, parser=None, base=None):
@@ -229,8 +234,12 @@ class ArgumentParser(argparse.ArgumentParser):
         actions.extend(conf_actions)
         self._actions = actions
 
-    def dump(self, file, ignore_none):
-        pass
+    def dump(self, args, file: Union[str, PathType], cfg_parser=None):
+        args = self.parse_args(args)
+        args = ns_to_dict(args)
+        print(args)
+        cfg_parser = ifnone(cfg_parser, YAMLParser())
+        cfg_parser.dump(args, file)
 
     def parse_group(self, args, parser: argparse.ArgumentParser, base=''):
         if not (base is None or base == ''):
@@ -346,6 +355,17 @@ def select_keys(d, keys: Union[str, List[str]], default=None):
         for k in keys:
             sel_d.update(get_key(d, k, default))
         return sel_d
+
+
+def ns_to_dict(ns: argparse.Namespace):
+    ns = ns.__dict__
+    for k, v in ns.items():
+        if isinstance(v, argparse.Namespace):
+            ns[k] = ns_to_dict(v)
+        elif isinstance(v, Path):
+            ns[k] = str(v)
+    return ns
+
 
 # class MyAct(argparse.Action):
 #     """
