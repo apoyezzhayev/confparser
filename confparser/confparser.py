@@ -8,7 +8,6 @@ from functools import reduce
 from pathlib import Path
 from typing import List, Dict, Union
 
-from confparser.actions import ActionConfFile
 from confparser.file_parser import YAMLParser, FileParser
 from confparser.types import PathType
 from confparser.utils import ifnone, listify
@@ -23,6 +22,7 @@ class ArgumentParser(argparse.ArgumentParser):
 
     def __init__(self, *args, **kwargs):
         self._conf_parsers = OrderedDict()
+        self._ignore_args = set()
         super().__init__(*args, **kwargs)
 
     # TODO: add support for nested cli arguments
@@ -40,7 +40,15 @@ class ArgumentParser(argparse.ArgumentParser):
                 if parser == self:
                     parser.parse_args_from_file(Path(w), ns_name=k, base=base, is_complete=False)
                 else:
-                    sub_args = parser.parse_args_from_file(Path(w), ns_name=k, base=base, is_complete=True)
+                    already_parsed = False
+                    if len(parser._conf_parsers) > 0:
+                        for _, (sub_parser, base) in parser._conf_parsers.items():
+                            if sub_parser == parser: # only if it has its own config parser
+                                sub_args = parser.parse_args_from_file(Path(w), ns_name=k, base=base, is_complete=True)
+                                already_parsed = True
+                                break
+                    if not already_parsed:
+                        sub_args = parser.parse_args_from_file(Path(w), ns_name=k, base=base, is_complete=True)
 
         # Parse all arguments from command-line
         with disable_required_args(self, only_defaults=True):
@@ -59,8 +67,11 @@ class ArgumentParser(argparse.ArgumentParser):
         :return:
         """
         parser = ifnone(parser, self)
+        arg_name = re.sub(r'^--?', '', arg_name)  # remove starting - if present
         self._conf_parsers[arg_name] = (parser, base)
         self.add_argument('--%s' % arg_name, type=PathType(exists=True, type='file'))
+        if parser == self:
+            self._ignore_args.add(arg_name)
         print('Added `--%s` configuration argument to %s parser' % (arg_name, str(parser.description)))
 
     def parse_args_from_dict(self, cfg: Dict,
@@ -197,12 +208,11 @@ class ArgumentParser(argparse.ArgumentParser):
             if k not in src_base_list:
                 continue
 
-            if k in self._reserved:
-                v = listify(v)
-                if k == '_positional':
-                    positional_args_list.extend([nested(str(val)) for val in v if val is not None])
-                elif k == '_flag':
-                    kwargs_list.extend(['-%s' % nested(str(val)) for val in v if val is not None])
+            if self._is_positional(k):
+                positional_args_list.append(nested(v))
+            elif k.startswith('flag_'):  # TODO: add proper flags check
+                k = k.replace('flag_', '-')
+                kwargs_list.append((nested(k), v))
             else:
                 if isinstance(v, Dict):
                     k = None if (dest_base is None and src_base is not None) else nested(k)
@@ -215,29 +225,58 @@ class ArgumentParser(argparse.ArgumentParser):
 
         return kwargs_list
 
-    def _resolve_conf_file_order(self):
-        """
-        Sorts the ArgumentParser._actions order to be in accordance with:
-            [simple_arguments, ActionConfFile arguments].
+    def _is_positional(self, arg_name):
+        if arg_name.startswith('positional_'):
+            return True
+        for a in self._positionals._group_actions:
+            if a.dest == arg_name:
+                return True
 
-        Configuration loading could be correctly processed only if
-        it's done after all other args are initialized
+    # def _resolve_conf_file_order(self):
+    #     """
+    #     Sorts the ArgumentParser._actions order to be in accordance with:
+    #         [simple_arguments, ActionConfFile arguments].
+    #
+    #     Configuration loading could be correctly processed only if
+    #     it's done after all other args are initialized
+    #     :return:
+    #     """
+    #     actions = []
+    #     conf_actions = []
+    #     for a in self._actions:
+    #         if isinstance(a, (ActionConfFile, MyAct)):
+    #             conf_actions.append(a)
+    #         else:
+    #             actions.append(a)
+    #     actions.extend(conf_actions)
+    #     self._actions = actions
+
+    def _resolve_dump(self, args: Dict, ignore):
+        tmp_args = args.copy()
+        for k, v in args.items():
+            if k in self._conf_parsers:
+                p, _ = self._conf_parsers[k]
+                if p != self:
+                    tmp_args[k] = p._resolve_dump(v, ignore)
+            if ignore and k in self._ignore_args:
+                del tmp_args[k]
+        return tmp_args
+
+    def dump(self, args: Union[List, Dict, argparse.Namespace], file: Union[str, PathType], cfg_parser=None,
+             ignore=True):
+        """
+
+        :param args:
+        :param file:
+        :param cfg_parser:
+        :param ignore:
         :return:
         """
-        actions = []
-        conf_actions = []
-        for a in self._actions:
-            if isinstance(a, (ActionConfFile, MyAct)):
-                conf_actions.append(a)
-            else:
-                actions.append(a)
-        actions.extend(conf_actions)
-        self._actions = actions
-
-    def dump(self, args, file: Union[str, PathType], cfg_parser=None):
-        args = self.parse_args(args)
-        args = ns_to_dict(args)
-        print(args)
+        if isinstance(args, list):
+            args = self.parse_args(args)
+        if isinstance(args, argparse.Namespace):
+            args = ns_to_dict(args)
+        args = self._resolve_dump(args, ignore)
         cfg_parser = ifnone(cfg_parser, YAMLParser())
         cfg_parser.dump(args, file)
 
@@ -365,7 +404,6 @@ def ns_to_dict(ns: argparse.Namespace):
         elif isinstance(v, Path):
             ns[k] = str(v)
     return ns
-
 
 # class MyAct(argparse.Action):
 #     """
