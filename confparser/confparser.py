@@ -7,12 +7,15 @@ from collections import OrderedDict
 from functools import reduce
 from pathlib import Path
 from typing import List, Dict, Union
+from warnings import warn
+import sys as _sys
 
 from confparser.file_parser import YAMLParser, FileParser
 from confparser.types import PathType
 from confparser.utils import ifnone, listify
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 READ_MODE = 'fr'
 
@@ -27,6 +30,9 @@ class ArgumentParser(argparse.ArgumentParser):
 
     # TODO: add support for nested cli arguments
     def parse_args(self, args=None, namespace=None) -> argparse.Namespace:
+        if args is None:
+            # args default to the system args
+            args = _sys.argv[1:]
         # First parsing to get configuration files paths arguments
         with disable_required_args(self):
             known, unknown = super(ArgumentParser, self).parse_known_args(args, namespace)
@@ -34,16 +40,19 @@ class ArgumentParser(argparse.ArgumentParser):
         # Parse configuration files if present in args
         sub_args = argparse.Namespace()
         for k, w in known.__dict__.items():
-            parser = self._conf_parsers.get(k)
-            if parser is not None and w is not None:
-                parser, base = parser
+            parser_tuple = self._conf_parsers.get(k)
+            if parser_tuple is not None and w is not None:
+                if not w.exists():
+                    logger.warning('File `%s does not exist' % w)
+                    continue
+                parser, base = parser_tuple
                 if parser == self:
                     parser.parse_args_from_file(Path(w), ns_name=k, base=base, is_complete=False)
                 else:
                     already_parsed = False
                     if len(parser._conf_parsers) > 0:
                         for _, (sub_parser, base) in parser._conf_parsers.items():
-                            if sub_parser == parser: # only if it has its own config parser
+                            if sub_parser == parser:  # only if it has its own config parser
                                 sub_args = parser.parse_args_from_file(Path(w), ns_name=k, base=base, is_complete=True)
                                 already_parsed = True
                                 break
@@ -69,10 +78,11 @@ class ArgumentParser(argparse.ArgumentParser):
         parser = ifnone(parser, self)
         arg_name = re.sub(r'^--?', '', arg_name)  # remove starting - if present
         self._conf_parsers[arg_name] = (parser, base)
-        self.add_argument('--%s' % arg_name, type=PathType(exists=True, type='file'))
+        # TODO: add rewrite handling
+        self.add_argument('--%s' % arg_name, type=PathType(exists=None, type='file'))
         if parser == self:
             self._ignore_args.add(arg_name)
-        print('Added `--%s` configuration argument to %s parser' % (arg_name, str(parser.description)))
+        logger.info('Added `--%s` configuration argument to %s parser' % (arg_name, str(parser.description)))
 
     def parse_args_from_dict(self, cfg: Dict,
                              ns_name: str = None,
@@ -86,6 +96,7 @@ class ArgumentParser(argparse.ArgumentParser):
         :return: types.SimpleNamespace: An object with all parsed values as nested attributes.
         """
         # Find corresponding nested-dictionary
+        logger.debug('Loading conf from base %s' % base)
         if cfg is None: raise ValueError('config is empty for parser %s' % self.description)
         selected_cfg = select_keys(cfg, base, default=cfg)
 
@@ -96,7 +107,7 @@ class ArgumentParser(argparse.ArgumentParser):
                 try:
                     get_key(cfg, base)
                 except KeyError as e:
-                    print('%s not in %s' % (str(e), cfg))
+                    logger.info('%s not in %s' % (str(e), cfg))
                     continue
                 sub_ns.update(parser.parse_args_from_dict(cfg, ns_name=dest, is_complete=False, base=base))
                 # To not consider them next time
@@ -138,6 +149,7 @@ class ArgumentParser(argparse.ArgumentParser):
         :param base: which keys of parsed dict should be considered if None it parses whole config dict
         :return: types.SimpleNamespace: An object with all parsed values as nested attributes.
         """
+        logger.info('Loading configuration from %s' % file)
         cfg = self._load_cfg_from_path(file, cfg_parser=cfg_parser)
         return self.parse_args_from_dict(cfg, ns_name, base, is_complete)
 
@@ -218,9 +230,10 @@ class ArgumentParser(argparse.ArgumentParser):
                     k = None if (dest_base is None and src_base is not None) else nested(k)
                     kwargs_list.extend(self._convert_dict_to_args_str(v, dest_base=k))
                 else:
-                    k = '--%s' % nested(str(k))
-                    v = v if v is None else str(v)
-                    kwargs_list.extend([k, v])
+                    if v is not None:
+                        k = '--%s' % nested(str(k))
+                        v = str(v)
+                        kwargs_list.extend([k, v])
         kwargs_list.extend(positional_args_list)
 
         return kwargs_list
@@ -272,13 +285,20 @@ class ArgumentParser(argparse.ArgumentParser):
         :param ignore:
         :return:
         """
+        args = copy.deepcopy(args)
+        file = Path(file).absolute()
         if isinstance(args, list):
             args = self.parse_args(args)
         if isinstance(args, argparse.Namespace):
             args = ns_to_dict(args)
         args = self._resolve_dump(args, ignore)
         cfg_parser = ifnone(cfg_parser, YAMLParser())
+        # Add warning
+        if file.exists():
+            logger.info('File %s will be overwritten.' % file)
+            warn('Delete previous configuration if you do not want to load presets from it')
         cfg_parser.dump(args, file)
+        logger.info('Current configuration saved to %s' % file)
 
     def parse_group(self, args, parser: argparse.ArgumentParser, base=''):
         if not (base is None or base == ''):
