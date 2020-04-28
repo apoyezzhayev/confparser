@@ -4,14 +4,18 @@ from pathlib import Path
 
 
 class PathType(object):
-    def __init__(self, exists=True, type='file', dash_ok=True):
-        '''exists:
-                True: a path that does exist
-                False: a path that does not exist, in a valid parent directory
-                None: don't care
-           type: file, dir, symlink, None, or a function returning True for valid paths
-                None: don't care
-           dash_ok: whether to allow "-" as stdin/stdout'''
+    def __init__(self, exists=None, type='file', dash_ok=True, create=False):
+        """
+        exists:
+            True: a path that does exist
+            False: a path that does not exist, in a valid parent directory
+            None: don't care
+       type: file, dir, symlink, None, or a function returning True for valid paths
+            None: don't care
+       dash_ok: whether to allow "-" as stdin/stdout
+       create: if dir doesn't exist whether to create the parent directories through the whole path, True-create
+        all parent dirs
+        """
 
         assert exists in (True, False, None)
         assert type in ('file', 'dir', 'symlink', None) or hasattr(type, '__call__')
@@ -19,6 +23,7 @@ class PathType(object):
         self._exists = exists
         self._type = type
         self._dash_ok = dash_ok
+        self._create = create
 
     def __call__(self, string):
         if string == '-':
@@ -53,6 +58,8 @@ class PathType(object):
                     raise err("path exists: '%s'" % string)
 
                 p = os.path.dirname(os.path.normpath(string)) or '.'
+                if self._create:
+                    Path(string if self._type == 'dir' else p).mkdir(parents=True, exist_ok=True)
                 if not os.path.isdir(p):
                     raise err("parent path is not a directory: '%s'" % p)
                 elif not os.path.exists(p):
