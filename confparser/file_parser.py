@@ -21,6 +21,5 @@ class YAMLParser(FileParser):
         try:
             with open(file, 'w') as f:
                 yaml.safe_dump(d, f)
-                print('Saved to %s' % file)
         except Exception as ex:
             raise type(ex)('Problem with saving :: ' + str(ex))
