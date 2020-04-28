@@ -15,7 +15,9 @@ setup(
     description='Configuration parser',
     long_description=long_description,
     long_description_content_type='text/markdown',
-
+    install_requires=[
+        'PyYAML',
+    ],
     url='',  # Optional
 
     author='apoyezzhaev',
